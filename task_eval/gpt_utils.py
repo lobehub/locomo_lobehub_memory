@@ -7,8 +7,9 @@ import random
 import os, json
 from tqdm import tqdm
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from global_methods import run_chatgpt
-from task_eval.rag_utils import get_embeddings
+from task_eval.rag_utils import get_embeddings, get_lobehub_contexts
 import tiktoken
 import numpy as np
 
@@ -51,8 +52,8 @@ Question: {} Short answer:
 # """
 
 QA_PROMPT_BATCH = """
-Based on the above conversations, write short answers for each of the following questions in a few words. 
-Write the answers in the form of a json dictionary where each entry contains the question number as "key" and the short answer as "value". 
+Based on the above conversations, write short answers for each of the following questions in a few words.
+Write the answers in the form of a json dictionary where each entry contains the question number as "key" and the short answer as "value".
 Use single-quote characters for named entities and double-quote characters for enclosing json elements. Answer with exact words from the conversations whenever possible.
 
 """
@@ -62,7 +63,7 @@ Use single-quote characters for named entities and double-quote characters for e
 CONV_START_PROMPT = "Below is a conversation between two people: {} and {}. The conversation takes place over multiple days and the date of each conversation is wriiten at the beginning of the conversation.\n\n"
 
 
-def process_ouput(text):
+def process_output(text):
 
     single_quote_count = text.count("'")
     double_quote_count = text.count('"')
@@ -78,6 +79,20 @@ def process_ouput(text):
 def prepare_for_rag(args, data):
 
     dataset_prefix = os.path.splitext(os.path.split(args.data_file)[-1])[0]
+
+    if args.retriever == "lobehub":
+        base_url = os.environ.get("LOBEHUB_BASE_URL")
+        if not base_url:
+            raise ValueError("LOBEHUB_BASE_URL must be set for lobehub retriever")
+
+        contexts, context_ids = get_lobehub_contexts(
+            base_url, data['sample_id'], [q['question'] for q in data['qa']], args.top_k
+        )
+        # return per-question context directly; use question index as vector placeholder
+        return {
+            'lobehub_contexts': contexts,
+            'lobehub_context_ids': context_ids,
+        }, np.arange(len(data['qa']))
 
     if args.rag_mode == "summary":
 
@@ -95,7 +110,7 @@ def prepare_for_rag(args, data):
             context_ids = []
             session_nums = [int(k.split('_')[-1]) for k in data['conversation'].keys() if 'session' in k and 'date_time' not in k]
             for i in range(min(session_nums), max(session_nums) + 1):
-            
+
                 date_time = data['conversation']['session_%s_date_time' % i]
                 for dialog in data['conversation']['session_%s' % i]:
                     context_ids.append(dialog['dia_id'])
@@ -121,7 +136,7 @@ def prepare_for_rag(args, data):
 
 
     elif args.rag_mode == 'observation':
-        
+
         # check if embeddings exist
         assert os.path.exists(os.path.join(args.emb_dir, '%s_observation_%s.pkl' % (dataset_prefix, data['sample_id']))), "Observations and embeddings do not exist for %s" % data['sample_id']
         database = pickle.load(open(os.path.join(args.emb_dir, '%s_observation_%s.pkl' % (dataset_prefix, data['sample_id'])), 'rb'))
@@ -129,7 +144,7 @@ def prepare_for_rag(args, data):
 
     else:
         raise ValueError
-    
+
     print("Getting embeddings for %s questions" % len(data['qa']))
     question_embeddings = get_embeddings(args.retriever, [q['question'] for q in data['qa']], 'query')
 
@@ -154,11 +169,17 @@ def get_cat_5_answer(model_prediction, answer_key):
 
 
 def get_rag_context(context_database, query_vector, args):
+    if args.retriever == "lobehub" and 'lobehub_contexts' in context_database:
+        idx = int(query_vector) if not isinstance(query_vector, (list, tuple, np.ndarray)) else int(query_vector[0])
+        context = context_database['lobehub_contexts'][idx]
+        context_ids = context_database.get('lobehub_context_ids', [])
+        ids = context_ids[idx] if len(context_ids) > idx else []
+        return context, ids
 
     output = np.dot(query_vector, context_database['embeddings'].T)
     sorted_outputs = np.argsort(output)[::-1]
     sorted_context = [context_database['context'][idx] for idx in sorted_outputs[:args.top_k]]
-    
+
     sorted_context_ids = []
     for idx in sorted_outputs[:args.top_k]:
         context_id = context_database['dia_id'][idx]
@@ -235,56 +256,121 @@ def get_gpt_answers(in_data, out_data, prediction_key, args):
     else:
         context_database, query_vectors = None, None
 
+    pending_idxs = [i for i in range(len(in_data['qa'])) if prediction_key not in out_data['qa'][i] or args.overwrite]
+    if len(pending_idxs) == 0:
+        return out_data
 
-    for batch_start_idx in tqdm(range(0, len(in_data['qa']), args.batch_size), desc='Generating answers'):
-
-        questions = []
-        include_idxs = []
-        cat_5_idxs = []
-        cat_5_answers = []
-        for i in range(batch_start_idx, batch_start_idx + args.batch_size):
-
-            if i>=len(in_data['qa']):
-                break
-
-            qa = in_data['qa'][i]
-            
-            if prediction_key not in out_data['qa'][i] or args.overwrite:
-                include_idxs.append(i)
+    # When batch_size == 1 we can fan out per-question GPT calls concurrently.
+    if args.batch_size == 1:
+        def build_question(idx):
+            qa = in_data['qa'][idx]
+            if qa['category'] == 2:
+                question = qa['question'] + ' Use DATE of CONVERSATION to answer with an approximate date.'
+                cat5_answer = None
+                prompt_template = QA_PROMPT
+            elif qa['category'] == 5:
+                adv_answer = qa.get('answer', qa.get('adversarial_answer', 'Unknown'))
+                question_tpl = qa['question'] + " Select the correct answer: (a) {} (b) {}. "
+                if random.random() < 0.5:
+                    question = question_tpl.format('Not mentioned in the conversation', adv_answer)
+                    cat5_answer = {'a': 'Not mentioned in the conversation', 'b': adv_answer}
+                else:
+                    question = question_tpl.format(adv_answer, 'Not mentioned in the conversation')
+                    cat5_answer = {'b': 'Not mentioned in the conversation', 'a': adv_answer}
+                prompt_template = QA_PROMPT_CAT_5
             else:
+                question = qa['question']
+                cat5_answer = None
+                prompt_template = QA_PROMPT
+            return question, prompt_template, cat5_answer
+
+        def generate_one(idx):
+            question, prompt_template, cat5_answer = build_question(idx)
+
+            if args.use_rag:
+                query_conv, context_ids = get_rag_context(context_database, query_vectors[idx], args)
+                prefix = ""
+            else:
+                question_prompt = prompt_template.format(question)
+                num_question_tokens = len(encoding.encode(question_prompt))
+                query_conv = get_input_context(in_data['conversation'], num_question_tokens + start_tokens, encoding, args)
+                query_conv = start_prompt + query_conv
+                context_ids = None
+                prefix = "\n\n"
+
+            if any(k in args.model for k in ['gpt-4', 'gpt-5']):
+                time.sleep(5)
+
+            query = query_conv + prefix + prompt_template.format(question)
+            answer = run_chatgpt(query, num_gen=1, num_tokens_request=32,
+                    model='chatgpt' if 'gpt-3.5' in args.model else args.model,
+                    use_16k=True if any([k in args.model for k in ['16k', '12k', '8k', '4k']]) else False,
+                    temperature=0, wait_time=2)
+
+            if cat5_answer is not None:
+                answer = get_cat_5_answer(answer, cat5_answer)
+            return idx, answer.strip(), context_ids
+
+        workers = max(1, args.gpt_max_concurrency)
+
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(generate_one, idx) for idx in pending_idxs]
+            for fut in tqdm(as_completed(futures), total=len(futures), desc='Generating answers'):
+                idx, answer, context_ids = fut.result()
+                out_data['qa'][idx][prediction_key] = answer
+                if args.use_rag and context_ids is not None:
+                    out_data['qa'][idx][prediction_key + '_context'] = context_ids
+    else:
+        for batch_start_idx in tqdm(range(0, len(in_data['qa']), args.batch_size), desc='Generating answers'):
+            questions = []
+            include_idxs = []
+            cat_5_idxs = []
+            cat_5_answers = []
+
+            for i in range(batch_start_idx, batch_start_idx + args.batch_size):
+                if i>=len(in_data['qa']):
+                    break
+
+                qa = in_data['qa'][i]
+
+                if prediction_key not in out_data['qa'][i] or args.overwrite:
+                    include_idxs.append(i)
+                else:
+                    continue
+
+                if qa['category'] == 2:
+                    questions.append(qa['question'] + ' Use DATE of CONVERSATION to answer with an approximate date.')
+                elif qa['category'] == 5:
+                    print(qa)
+                    # Adversarial questions store the distractor under 'adversarial_answer' instead of 'answer'
+                    adv_answer = qa.get('answer', qa.get('adversarial_answer', 'Unknown'))
+                    question = qa['question'] + " Select the correct answer: (a) {} (b) {}. "
+                    if random.random() < 0.5:
+                        question = question.format('Not mentioned in the conversation', adv_answer)
+                        answer = {'a': 'Not mentioned in the conversation', 'b': adv_answer}
+                    else:
+                        question = question.format(adv_answer, 'Not mentioned in the conversation')
+                        answer = {'b': 'Not mentioned in the conversation', 'a': adv_answer}
+
+                    cat_5_idxs.append(len(questions))
+                    questions.append(question)
+                    cat_5_answers.append(answer)
+                else:
+                    questions.append(qa['question'])
+
+
+            if questions == []:
                 continue
 
-            if qa['category'] == 2:
-                questions.append(qa['question'] + ' Use DATE of CONVERSATION to answer with an approximate date.')
-            elif qa['category'] == 5:
-                question = qa['question'] + " Select the correct answer: (a) {} (b) {}. "
-                if random.random() < 0.5:
-                    question = question.format('Not mentioned in the conversation', qa['answer'])
-                    answer = {'a': 'Not mentioned in the conversation', 'b': qa['answer']}
-                else:
-                    question = question.format(qa['answer'], 'Not mentioned in the conversation')
-                    answer = {'b': 'Not mentioned in the conversation', 'a': qa['answer']}
 
-                cat_5_idxs.append(len(questions))
-                questions.append(question)
-                cat_5_answers.append(answer)
-                # questions.append(qa['question'] + "Write NOT ANSWERABLE if the question cannot be answered")
+            if args.use_rag:
+                query_conv, context_ids = get_rag_context(context_database, query_vectors[include_idxs][0], args) # rag mode is set to batch size 1
             else:
-                questions.append(qa['question'])
+                question_prompt =  QA_PROMPT_BATCH + "\n".join(["%s: %s" % (k, q) for k, q in enumerate(questions)])
+                num_question_tokens = len(encoding.encode(question_prompt))
+                query_conv = get_input_context(in_data['conversation'], num_question_tokens + start_tokens, encoding, args)
+                query_conv = start_prompt + query_conv
 
-
-        if questions == []:
-            continue
-
-
-        if args.use_rag:
-            query_conv, context_ids = get_rag_context(context_database, query_vectors[include_idxs][0], args) # rag mode is set to batch size 1
-        else:
-            question_prompt =  QA_PROMPT_BATCH + "\n".join(["%s: %s" % (k, q) for k, q in enumerate(questions)])
-            num_question_tokens = len(encoding.encode(question_prompt))
-            query_conv = get_input_context(in_data['conversation'], num_question_tokens + start_tokens, encoding, args)
-            query_conv = start_prompt + query_conv
-        
 
             if any(k in args.model for k in ['gpt-4', 'gpt-5']):
                 time.sleep(5)

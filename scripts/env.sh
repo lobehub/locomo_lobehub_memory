@@ -26,3 +26,6 @@ export ANTHROPIC_API_KEY=
 
 # HuggingFace Token
 export HF_TOKEN=
+
+# LobeChat base URL for lobehub retriever (used when integrating with @lobechat/memory-user-memory)
+export LOBEHUB_BASE_URL=${LOBEHUB_BASE_URL:-http://localhost:3010}

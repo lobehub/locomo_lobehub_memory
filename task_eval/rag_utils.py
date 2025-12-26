@@ -4,6 +4,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import time
 import os, json
+import numpy as np
+import requests
 import torch
 from tqdm import tqdm
 from global_methods import get_openai_embedding, set_openai_key, run_chatgpt_with_examples
@@ -12,7 +14,7 @@ from global_methods import get_openai_embedding, set_openai_key, run_chatgpt_wit
 
 def save_eval(data_file, accs, key='exact_match'):
 
-    
+
     if os.path.exists(data_file.replace('.json', '_scores.json')):
         data = json.load(open(data_file.replace('.json', '_scores.json')))
     else:
@@ -21,7 +23,7 @@ def save_eval(data_file, accs, key='exact_match'):
     assert len(data['qa']) == len(accs), (len(data['qa']), len(accs), accs)
     for i in range(0, len(data['qa'])):
         data['qa'][i][key] = accs[i]
-    
+
     with open(data_file.replace('.json', '_scores.json'), 'w') as f:
         json.dump(data, f, indent=2)
 
@@ -61,10 +63,10 @@ def init_context_model(retriever):
 
         set_openai_key()
         return None, None
-    
+
     else:
         raise ValueError
-    
+
 def init_query_model(retriever):
 
     if retriever == 'dpr':
@@ -94,18 +96,21 @@ def init_query_model(retriever):
 
         set_openai_key()
         return None, None
-    
+
     else:
         raise ValueError
 
 
 def get_embeddings(retriever, inputs, mode='context'):
 
+    if retriever == 'lobehub':
+        raise ValueError("get_embeddings should not be called for lobehub retriever")
+
     if mode == 'context':
         tokenizer, encoder = init_context_model(retriever)
     else:
         tokenizer, encoder = init_query_model(retriever)
-    
+
     all_embeddings = []
     batch_size = 24
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -190,3 +195,85 @@ def get_context_embeddings(retriever, data, context_tokenizer, context_encoder, 
     # print(context_embeddings.shape[0])
 
     return context_ids, context_embeddings
+
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
+def get_lobehub_contexts(base_url, sample_id, questions, top_k, max_attempts=5, backoff_sec=2.0, max_workers=8):
+    """
+    Fetch top-K memory snippets for each question from the LobeChat dev endpoint.
+    """
+    # Run one HTTP request per question in parallel. Keep ordering stable by pre-sizing outputs.
+    contexts = [None] * len(questions)
+    context_ids = [None] * len(questions)
+
+    url = f"{base_url}/api/dev/memory-user-memory/benchmark-locomo"
+
+    def fetch_one(q_idx, question):
+        last_err = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                resp = requests.post(
+                    url,
+                    json={"sampleId": sample_id, "query": question, "topK": top_k},
+                    timeout=120,
+                )
+                if not resp.ok:
+                    raise RuntimeError(
+                        f"LoBeChat search failed {resp.status_code}: {resp.text[:300]} (url={url}, sample={sample_id})"
+                    )
+                try:
+                    data = resp.json()
+                except Exception as exc:
+                    raise RuntimeError(
+                        f"LoBeChat search returned non-JSON (url={url}, status={resp.status_code}, body={resp.text[:300]})"
+                    ) from exc
+                return q_idx, data
+            except Exception as exc:
+                last_err = exc
+                if attempt == max_attempts:
+                    raise
+                wait = backoff_sec * attempt
+                print(f"[get_lobehub_contexts] attempt {attempt}/{max_attempts} failed: {exc}. Retrying in {wait}s...")
+                time.sleep(wait)
+        # Should not reach here, but surface the last error just in case.
+        raise last_err  # type: ignore
+
+    def _format(item):
+        memory = item.get("memory") if isinstance(item.get("memory"), dict) else {}
+        context = item.get("context") if isinstance(item.get("context"), dict) else {}
+        parts = [
+            item.get("title") or memory.get("title") or "",
+            memory.get("summary") or item.get("summary"),
+            memory.get("details") or item.get("details"),
+            context.get("description"),
+            context.get("currentStatus"),
+        ]
+        return "\n".join([p for p in parts if p]).strip()
+
+    workers = min(max_workers, max(1, len(questions)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_idx = {
+            executor.submit(fetch_one, idx, question): idx
+            for idx, question in enumerate(questions)
+        }
+        for future in as_completed(future_to_idx):
+            q_idx = future_to_idx[future]
+            idx, data = future.result()
+
+            items = data.get("items", [])
+            formatted_items = []
+            ids = []
+            for it in items:
+                formatted = _format(it)
+                if formatted:
+                    formatted_items.append(formatted)
+                if it.get("id"):
+                    ids.append(it["id"])
+
+            contexts[idx] = "\n\n".join(formatted_items)
+            context_ids[idx] = ids
+
+    # Return plain Python lists to avoid downstream JSON serialization issues
+    return contexts, context_ids

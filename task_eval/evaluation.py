@@ -197,9 +197,9 @@ def eval_question_answering(qas, eval_key='prediction', metric='f1'):
     for i, line in enumerate(qas):
         # line = json.loads(line)
         if type(line[eval_key]) == list:
-            answer = line['answer']
+            answer = line.get('answer', line.get('adversarial_answer', ''))
         else:
-            answer = str(line['answer'])
+            answer = str(line.get('answer', line.get('adversarial_answer', '')))
         if line['category'] == 3:
             answer = answer.split(';')[0].strip()
         
@@ -225,7 +225,7 @@ def eval_question_answering(qas, eval_key='prediction', metric='f1'):
         
         assert i+1 == len(all_ems), all_ems
 
-        if eval_key + '_context' in line and len(line['evidence']) > 0:
+        if eval_key + '_context' in line and len(line['evidence']) > 0 and len(line[eval_key + '_context']) > 0:
             # recall_acc for dialog
             if line[eval_key + '_context'][0].startswith('S'):
                 sessions = [e[1:] for e in line[eval_key + '_context']]
@@ -290,4 +290,3 @@ def eval_dialogue_system(infile):
     lens = round(np.mean(answer_lengths), 4)
 
     return F1, RL, lens
-

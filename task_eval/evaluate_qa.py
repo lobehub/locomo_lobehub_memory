@@ -43,6 +43,8 @@ def parse_args():
     parser.add_argument('--top-k', type=int, default=5)
     parser.add_argument('--retriever', type=str, default="contriever")
     parser.add_argument('--overwrite', action="store_true")
+    parser.add_argument('--gpt-max-concurrency', type=int, default=4,
+                        help="Max concurrent GPT calls when batch-size=1 (no effect for batched prompts).")
     args = parser.parse_args()
     return args
 
