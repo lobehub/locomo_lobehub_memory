@@ -16,6 +16,19 @@ from task_eval.hf_llm_utils import init_hf_model, get_hf_answers
 import numpy as np
 import google.generativeai as genai
 
+def is_openai_like_model(model_name: str) -> bool:
+    """
+    Treat OpenAI-format chat models and OpenAI-compatible providers as GPT-flow.
+    """
+    prefixes = (
+        'gpt-', 'gpt',           # default OpenAI names
+        'openai/',               # explicit OpenAI namespace
+        'deepseek/',             # DeepSeek via OpenAI-compatible endpoint
+        'google/gemini'          # Gemini served via OpenAI-compatible endpoint
+    )
+    return any(model_name.startswith(p) for p in prefixes) or 'gpt-' in model_name
+
+
 def parse_args():
 
     parser = argparse.ArgumentParser()
@@ -41,7 +54,7 @@ def main():
 
     print("******************  Evaluating Model %s ***************" % args.model)
 
-    if 'gpt' in args.model:
+    if is_openai_like_model(args.model):
         # set openai API key
         set_openai_key()
 
@@ -54,9 +67,10 @@ def main():
         set_gemini_key()
         if args.model == "gemini-pro-1.0":
             model_name = "models/gemini-1.0-pro-latest"
-
+        else:
+            model_name = args.model
         gemini_model = genai.GenerativeModel(model_name)
-    
+
     elif any([model_name in args.model for model_name in ['gemma', 'llama', 'mistral']]):
         hf_pipeline, hf_model_name = init_hf_model(args)
 
@@ -68,6 +82,11 @@ def main():
     samples = json.load(open(args.data_file))
     prediction_key = "%s_prediction" % args.model if not args.use_rag else "%s_%s_top_%s_prediction" % (args.model, args.rag_mode, args.top_k)
     model_key = "%s" % args.model if not args.use_rag else "%s_%s_top_%s" % (args.model, args.rag_mode, args.top_k)
+    # ensure output directory exists
+    out_dir = os.path.dirname(args.out_file)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
     # load the output file if it exists to check for overwriting
     if os.path.exists(args.out_file):
         out_samples = {d['sample_id']: d for d in json.load(open(args.out_file))}
@@ -83,7 +102,7 @@ def main():
         else:
             out_data['qa'] = data['qa'].copy()
 
-        if 'gpt' in args.model:
+        if is_openai_like_model(args.model):
             # get answers for each sample
             answers = get_gpt_answers(data, out_data, prediction_key, args)
         elif 'claude' in args.model:
@@ -108,11 +127,10 @@ def main():
     with open(args.out_file, 'w') as f:
         json.dump(list(out_samples.values()), f, indent=2)
 
-    
+
     analyze_aggr_acc(args.data_file, args.out_file, args.out_file.replace('.json', '_stats.json'),
                 model_key, model_key + '_f1', rag=args.use_rag)
     # encoder=tiktoken.encoding_for_model(args.model))
 
 
 main()
-

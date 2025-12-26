@@ -213,10 +213,10 @@ def get_input_context(data, question_prompt, encoding, args):
                     break
 
             query_conv = '\nDATE: ' + data['session_%s_date_time' % i] + '\n' + 'CONVERSATION:\n' + query_conv
-        
+
         if stop:
             break
-    
+
     query_conv = start_prompt + query_conv
 
     return query_conv
@@ -241,7 +241,7 @@ def get_hf_answers(in_data, out_data, args, pipeline, model_name):
             if i>=len(in_data['qa']):
                 break
             qa = in_data['qa'][i]
-            # skip if already predicted and overwrite is set to False            
+            # skip if already predicted and overwrite is set to False
             if '%s_prediction' % args.model not in qa or args.overwrite:
                 include_idxs.append(i)
             else:
@@ -252,13 +252,15 @@ def get_hf_answers(in_data, out_data, args, pipeline, model_name):
             if qa['category'] == 2:
                 questions.append(qa['question'] + ' Use DATE of CONVERSATION to answer with an approximate date.')
             elif qa['category'] == 5:
+                print("Adversarial question detected")
+                adv_answer = qa.get('answer', qa.get('adversarial_answer', 'Unknown'))
                 question = qa['question'] + " (a) {} (b) {}. Select the correct answer by writing (a) or (b)."
                 if random.random() < 0.5:
-                    question = question.format('No information available', qa['answer'])
-                    answer = {'a': 'No information available', 'b': qa['answer']}
+                    question = question.format('No information available', adv_answer)
+                    answer = {'a': 'No information available', 'b': adv_answer}
                 else:
-                    question = question.format(qa['answer'], 'No information available')
-                    answer = {'b': 'No information available', 'a': qa['answer']}
+                    question = question.format(adv_answer, 'No information available')
+                    answer = {'b': 'No information available', 'a': adv_answer}
                 cat_5_idxs.append(len(questions))
                 questions.append(question)
                 cat_5_answers.append(answer)
@@ -280,7 +282,7 @@ def get_hf_answers(in_data, out_data, args, pipeline, model_name):
                 answer = run_gemma(pipeline, questions[0], in_data, encoding, args)
             else:
                 raise NotImplementedError
-            
+
             print(questions[0], answer)
 
             # post process answers, necessary for Adversarial Questions
@@ -296,7 +298,7 @@ def get_hf_answers(in_data, out_data, args, pipeline, model_name):
                 answer = answer.lower().replace('(a)', '').replace('(b)', '').replace('a)', '').replace('b)', '').replace('answer:', '').strip()
             out_data['qa'][batch_start_idx]['%s_prediction' % args.model] = answer
 
-        else:            
+        else:
             raise NotImplementedError
 
     return out_data
@@ -327,10 +329,10 @@ def init_hf_model(args):
 
     elif args.model in ['mistral-instruct-7b-8k-new']:
         model_name = "mistralai/Mistral-7B-Instruct-v0.1"
-    
+
     elif args.model in ['mistral-instruct-7b-32k-v2']:
         model_name = "mistralai/Mistral-7B-Instruct-v0.2"
-    
+
     elif args.model in ['gemma-7b-it']:
         model_name = 'google/gemma-7b-it'
 
@@ -339,7 +341,7 @@ def init_hf_model(args):
 
     else:
         raise ValueError
-    
+
     hf_token = os.environ['HF_TOKEN']
     huggingface_hub.login(hf_token)
 
@@ -362,8 +364,8 @@ def init_hf_model(args):
 
         if 'mistralai' in model_name:
             if 'v0.1' in model_name:
-                model = AutoModelForCausalLM.from_pretrained(model_name, 
-                                                            torch_dtype=torch.float16, 
+                model = AutoModelForCausalLM.from_pretrained(model_name,
+                                                            torch_dtype=torch.float16,
                                                             attn_implementation="flash_attention_2",
                                                             quantization_config=bnb_config,
                                                             device_map="auto",
@@ -373,9 +375,9 @@ def init_hf_model(args):
                                                             quantization_config=bnb_config,
                                                             device_map="auto",
                                                             trust_remote_code=True)
-        
+
         else:
-            model = AutoModelForCausalLM.from_pretrained(model_name, 
+            model = AutoModelForCausalLM.from_pretrained(model_name,
                                             torch_dtype=torch.float16,
                                             quantization_config=bnb_config,
                                             device_map="auto",
@@ -388,7 +390,7 @@ def init_hf_model(args):
             trust_remote_code=True,
             device_map="auto",    # finds GPU
         )
-    
+
     else:
         pipeline = transformers.pipeline(
             "text-generation",
@@ -397,7 +399,6 @@ def init_hf_model(args):
             device_map="auto"
         )
         # pipeline = None
-    
+
     print("Loaded model")
     return pipeline, model_name
-

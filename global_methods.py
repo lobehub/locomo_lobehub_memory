@@ -22,10 +22,14 @@ def set_gemini_key():
     genai.configure(api_key=os.environ['GOOGLE_API_KEY'])
 
 def set_openai_key():
-    openai.api_key = os.environ['OPENAI_API_KEY']
+    key = os.environ.get('OPENAI_API_KEY')
+    base = os.environ.get('OPENAI_BASE_URL')
+    openai.api_key = key
+    if base:
+        openai.api_base = base
 
 
-def run_json_trials(query, num_gen=1, num_tokens_request=1000, 
+def run_json_trials(query, num_gen=1, num_tokens_request=1000,
                 model='davinci', use_16k=False, temperature=1.0, wait_time=1, examples=None, input=None):
 
     run_loop = True
@@ -89,7 +93,7 @@ def run_gemini(model, content: str, max_tokens: int = 0):
         return None
 
 
-def run_chatgpt(query, num_gen=1, num_tokens_request=1000, 
+def run_chatgpt(query, num_gen=1, num_tokens_request=1000,
                 model='chatgpt', use_16k=False, temperature=1.0, wait_time=1):
 
     completion = None
@@ -105,30 +109,17 @@ def run_chatgpt(query, num_gen=1, num_tokens_request=1000,
             #                     n=num_gen,
             #                     prompt=query
             #                 )
-            if model == 'chatgpt':
+            target_model = "gpt-3.5-turbo" if model == 'chatgpt' else model
+            role = "system" if model == 'chatgpt' else "user"
+            completion = openai.ChatCompletion.create(
+                model=target_model,
+                temperature = temperature,
+                max_tokens = num_tokens_request,
+                n=num_gen,
                 messages = [
-                        {"role": "system", "content": query}
-                    ]
-                completion = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    temperature = temperature,
-                    max_tokens = num_tokens_request,
-                    n=num_gen,
-                    messages = messages
-                )
-            elif 'gpt-4' in model:
-                completion = openai.ChatCompletion.create(
-                    model=model,
-                    temperature = temperature,
-                    max_tokens = num_tokens_request,
-                    n=num_gen,
-                    messages = [
-                        {"role": "user", "content": query}
-                    ]
-                )
-            else:
-                print("Did not find model %s" % model)
-                raise ValueError
+                    {"role": role, "content": query}
+                ]
+            )
         except openai.error.APIError as e:
             #Handle API error here, e.g. retry or log
             print(f"OpenAI API returned an API Error: {e}; waiting for {wait_time} seconds")
@@ -148,12 +139,15 @@ def run_chatgpt(query, num_gen=1, num_tokens_request=1000,
             print(f"OpenAI API request exceeded rate limit: {e}; waiting for {wait_time} seconds")
             time.sleep(wait_time)
             pass
+        except openai.error.AuthenticationError as e:
+            print(f"OpenAI API AuthenticationError: {e}")
+            raise
         # except Exception as e:
         #     if e:
         #         print(e)
         #         print(f"Timeout error, retrying after waiting for {wait_time} seconds")
         #         time.sleep(wait_time)
-    
+
 
     if model == 'davinci':
         outputs = [choice.get('text').strip() for choice in completion.get('choices')]
@@ -165,12 +159,12 @@ def run_chatgpt(query, num_gen=1, num_tokens_request=1000,
     else:
         # print(completion.choices[0].message.content)
         return completion.choices[0].message.content
-    
+
 
 def run_chatgpt_with_examples(query, examples, input, num_gen=1, num_tokens_request=1000, use_16k=False, wait_time = 1, temperature=1.0):
 
     completion = None
-    
+
     messages = [
         {"role": "system", "content": query}
     ]
@@ -183,8 +177,8 @@ def run_chatgpt_with_examples(query, examples, input, num_gen=1, num_tokens_requ
         )
     messages.append(
         {"role": "user", "content": input}
-    )   
-    
+    )
+
     while completion is None:
         wait_time = wait_time * 2
         try:
@@ -214,5 +208,5 @@ def run_chatgpt_with_examples(query, examples, input, num_gen=1, num_tokens_requ
             print(f"OpenAI API request exceeded rate limit: {e}; waiting for {wait_time} seconds")
             time.sleep(wait_time)
             pass
-    
+
     return completion.choices[0].message.content

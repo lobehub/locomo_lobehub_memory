@@ -13,6 +13,17 @@ import tiktoken
 import numpy as np
 
 MAX_LENGTH={'gpt-4-turbo': 128000,
+            'gpt-4o-mini': 128000,
+            'openai/gpt-4o-mini': 128000,
+            'gpt-5-mini': 272000,
+            'openai/gpt-5-mini': 272000,
+            'gpt-5': 400000,
+            'openai/gpt-5': 400000,
+            'openai/gpt-5.2': 400000,
+            'deepseek/deepseek-v3.2': 128000,
+            'google/gemini-2.5-flash': 128000,
+            'google/gemini-3-flash-preview': 128000,
+            'google/gemini-2.5-flash-lite': 128000,
             'gpt-4': 4096,
             'gpt-3.5-turbo-16k': 16000,
             'gpt-3.5-turbo-12k': 12000,
@@ -184,9 +195,9 @@ def get_input_context(data, num_question_tokens, encoding, args):
                 if "blip_caption" in dialog:
                     turn += ' and shared %s.' % dialog["blip_caption"]
                 turn += '\n'
-        
+
                 num_tokens = len(encoding.encode('DATE: ' + data['session_%s_date_time' % i] + '\n' + 'CONVERSATION:\n' + turn))
-                if (num_tokens + len(encoding.encode(query_conv)) + num_question_tokens) < (MAX_LENGTH[args.model]-(PER_QA_TOKEN_BUDGET*(args.batch_size))): # 20 tokens assigned for answers
+                if (num_tokens + len(encoding.encode(query_conv)) + num_question_tokens) < (MAX_LENGTH.get(args.model, 128000)-(PER_QA_TOKEN_BUDGET*(args.batch_size))): # 20 tokens assigned for answers
                     query_conv = turn + query_conv
                 else:
                     min_session = i
@@ -195,7 +206,7 @@ def get_input_context(data, num_question_tokens, encoding, args):
             query_conv = 'DATE: ' + data['session_%s_date_time' % i] + '\n' + 'CONVERSATION:\n' + query_conv
         if stop:
             break
-        
+
         # if min_session == -1:
         #     print("Saved %s tokens in query conversation from full conversation" % len(encoding.encode(query_conv)))
         # else:
@@ -207,7 +218,10 @@ def get_input_context(data, num_question_tokens, encoding, args):
 def get_gpt_answers(in_data, out_data, prediction_key, args):
 
 
-    encoding = tiktoken.encoding_for_model('gpt-3.5-turbo-16k' if any([k in args.model for k in ['16k', '12k', '8k', '4k']]) else args.model)
+    try:
+        encoding = tiktoken.encoding_for_model('gpt-3.5-turbo-16k' if any([k in args.model for k in ['16k', '12k', '8k', '4k']]) else args.model)
+    except Exception:
+        encoding = tiktoken.get_encoding('cl100k_base')
     assert len(in_data['qa']) == len(out_data['qa']), (len(in_data['qa']), len(out_data['qa']))
 
     # start instruction prompt
@@ -272,57 +286,31 @@ def get_gpt_answers(in_data, out_data, prediction_key, args):
             query_conv = start_prompt + query_conv
         
 
-        # print("%s tokens in query" % len(encoding.encode(query_conv)))
+            if any(k in args.model for k in ['gpt-4', 'gpt-5']):
+                time.sleep(5)
 
-        if 'gpt-4' in args.model:
-            time.sleep(5)
-
-        elif 'gpt-4' in args.model:
-            time.sleep(1)
-
-        if args.batch_size == 1:
-
-            query = query_conv + '\n\n' + QA_PROMPT.format(questions[0]) if len(cat_5_idxs) == 0 else query_conv + '\n\n' + QA_PROMPT_CAT_5.format(questions[0])
-            answer = run_chatgpt(query, num_gen=1, num_tokens_request=32, 
-                    model='chatgpt' if 'gpt-3.5' in args.model else args.model, 
-                    use_16k=True if any([k in args.model for k in ['16k', '12k', '8k', '4k']]) else False, 
-                    temperature=0, wait_time=2)
-            
-            if len(cat_5_idxs) > 0:
-                answer = get_cat_5_answer(answer, cat_5_answers[0])
-
-            out_data['qa'][include_idxs[0]][prediction_key] = answer.strip()
-            if args.use_rag:
-                out_data['qa'][include_idxs[0]][prediction_key + '_context'] = context_ids
-
-        else:
-            # query = query_conv + '\n' + QA_PROMPT_BATCH + "\n".join(["QUESTION: %s" % q for q in questions])
             query = query_conv + '\n' + question_prompt
-            
+
             trials = 0
             while trials < 3:
                 try:
                     trials += 1
                     print("Trial %s/3" % trials)
-                    # print("Sending query of %s tokens" % len(encoding.encode(query)))
-                    # print("Trying with answer token budget = %s per question" % PER_QA_TOKEN_BUDGET)
-                    answer = run_chatgpt(query, num_gen=1, num_tokens_request=args.batch_size*PER_QA_TOKEN_BUDGET, 
-                            model='chatgpt' if 'gpt-3.5' in args.model else args.model, 
-                            use_16k=True if any([k in args.model for k in ['16k', '12k', '8k', '4k']]) else False, 
+                    answer = run_chatgpt(query, num_gen=1, num_tokens_request=args.batch_size*PER_QA_TOKEN_BUDGET,
+                            model='chatgpt' if 'gpt-3.5' in args.model else args.model,
+                            use_16k=True if any([k in args.model for k in ['16k', '12k', '8k', '4k']]) else False,
                             temperature=0, wait_time=2)
                     answer = answer.replace('\\"', "'").replace('json','').replace('`','').strip().replace("\\'", "")
-                    answers = process_ouput(answer.strip())
+                    answers = process_output(answer.strip())
                     break
 
                 except Exception as e:
                     print('Error at trial %s/3' % trials, e)
                     raise ValueError
-            
+
             for k, idx in enumerate(include_idxs):
                 try:
-                    answers = process_ouput(answer.strip())
-                    # answers = json.loads(answer.strip())
-                    # data['qa'][idx]['%s_prediction' % args.model] = answers[k]['answer'].strip()
+                    answers = process_output(answer.strip())
                     if k in cat_5_idxs:
                         predicted_answer = get_cat_5_answer(answers[str(k)], cat_5_answers[cat_5_idxs.index(k)])
                         out_data['qa'][idx][prediction_key] = predicted_answer
