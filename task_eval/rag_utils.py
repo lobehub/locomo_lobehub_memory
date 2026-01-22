@@ -200,7 +200,16 @@ def get_context_embeddings(retriever, data, context_tokenizer, context_encoder, 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
-def get_lobehub_contexts(base_url, sample_id, questions, top_k, max_attempts=5, backoff_sec=2.0, max_workers=8):
+def get_lobehub_contexts(
+    base_url,
+    sample_id,
+    questions,
+    top_k,
+    max_attempts=5,
+    backoff_sec=2.0,
+    timeout_sec=120,
+    max_workers=8,
+):
     """
     Fetch top-K memory snippets for each question from the LobeChat dev endpoint.
     """
@@ -217,7 +226,7 @@ def get_lobehub_contexts(base_url, sample_id, questions, top_k, max_attempts=5, 
                 resp = requests.post(
                     url,
                     json={"sampleId": sample_id, "query": question, "topK": top_k},
-                    timeout=120,
+                    timeout=timeout_sec,
                 )
                 if not resp.ok:
                     raise RuntimeError(

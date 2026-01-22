@@ -97,6 +97,7 @@ def run_chatgpt(query, num_gen=1, num_tokens_request=1000,
                 model='chatgpt', use_16k=False, temperature=1.0, wait_time=1):
 
     completion = None
+    print(f'[run_chatgpt] model={model} max_tokens_ignored={num_tokens_request} use_16k={use_16k} temp={temperature} key_set={bool(openai.api_key)} key_preview={openai.api_key[:6]+"..."+openai.api_key[-4:] if openai.api_key else "None"}')
     while completion is None:
         wait_time = wait_time * 2
         try:
@@ -114,7 +115,6 @@ def run_chatgpt(query, num_gen=1, num_tokens_request=1000,
             completion = openai.ChatCompletion.create(
                 model=target_model,
                 temperature = temperature,
-                max_tokens = num_tokens_request,
                 n=num_gen,
                 messages = [
                     {"role": role, "content": query}
@@ -123,6 +123,11 @@ def run_chatgpt(query, num_gen=1, num_tokens_request=1000,
         except openai.error.APIError as e:
             #Handle API error here, e.g. retry or log
             print(f"OpenAI API returned an API Error: {e}; waiting for {wait_time} seconds")
+            time.sleep(wait_time)
+            pass
+        except openai.error.Timeout as e:
+            # Retry on read timeouts from the OpenAI client stack
+            print(f"OpenAI API request timed out: {e}; waiting for {wait_time} seconds")
             time.sleep(wait_time)
             pass
         except openai.error.APIConnectionError as e:
@@ -185,13 +190,17 @@ def run_chatgpt_with_examples(query, examples, input, num_gen=1, num_tokens_requ
             completion = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo" if not use_16k else "gpt-3.5-turbo-16k",
                 temperature = temperature,
-                max_tokens = num_tokens_request,
                 n=num_gen,
                 messages = messages
             )
         except openai.error.APIError as e:
             #Handle API error here, e.g. retry or log
             print(f"OpenAI API returned an API Error: {e}; waiting for {wait_time} seconds")
+            time.sleep(wait_time)
+            pass
+        except openai.error.Timeout as e:
+            # Retry on read timeouts from the OpenAI client stack
+            print(f"OpenAI API request timed out: {e}; waiting for {wait_time} seconds")
             time.sleep(wait_time)
             pass
         except openai.error.APIConnectionError as e:

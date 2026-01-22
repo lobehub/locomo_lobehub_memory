@@ -4,6 +4,7 @@ set -euo pipefail
 source "$(dirname "$0")/env.sh"
 
 TOP_K="${TOP_K:-10}"
+GPT_WAIT_TIME="${GPT_WAIT_TIME:-600}"
 OUT_FILE="${OUT_DIR}/${QA_OUTPUT_FILE/.json/_lobehub_top${TOP_K}.json}"
 
 python3 task_eval/evaluate_qa.py \
@@ -14,4 +15,8 @@ python3 task_eval/evaluate_qa.py \
   --use-rag \
   --retriever lobehub \
   --top-k "$TOP_K" \
-  --rag-mode dialog
+  --rag-mode dialog \
+  --lobehub-max-retries 10 \
+  --lobehub-retry-backoff 5 \
+  --lobehub-timeout 600 \
+  --gpt-wait-time "$GPT_WAIT_TIME"

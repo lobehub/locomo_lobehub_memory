@@ -45,6 +45,16 @@ def parse_args():
     parser.add_argument('--overwrite', action="store_true")
     parser.add_argument('--gpt-max-concurrency', type=int, default=4,
                         help="Max concurrent GPT calls when batch-size=1 (no effect for batched prompts).")
+    parser.add_argument('--lobehub-max-retries', type=int, default=5,
+                        help="Retries for LobeHub context fetches.")
+    parser.add_argument('--lobehub-retry-backoff', type=float, default=2.0,
+                        help="Base backoff (seconds) between LobeHub retries.")
+    parser.add_argument('--lobehub-timeout', type=int, default=120,
+                        help="Per-request timeout (seconds) for LobeHub context fetches.")
+    parser.add_argument('--lobehub-max-workers', type=int, default=8,
+                        help="Max concurrent LobeHub context fetches.")
+    parser.add_argument('--gpt-wait-time', type=float, default=2.0,
+                        help="Initial wait (seconds) before retrying failed OpenAI requests; doubles each retry.")
     args = parser.parse_args()
     return args
 

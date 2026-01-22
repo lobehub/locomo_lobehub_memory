@@ -86,7 +86,14 @@ def prepare_for_rag(args, data):
             raise ValueError("LOBEHUB_BASE_URL must be set for lobehub retriever")
 
         contexts, context_ids = get_lobehub_contexts(
-            base_url, data['sample_id'], [q['question'] for q in data['qa']], args.top_k
+            base_url,
+            data['sample_id'],
+            [q['question'] for q in data['qa']],
+            args.top_k,
+            max_attempts=args.lobehub_max_retries,
+            backoff_sec=args.lobehub_retry_backoff,
+            timeout_sec=args.lobehub_timeout,
+            max_workers=args.lobehub_max_workers,
         )
         # return per-question context directly; use question index as vector placeholder
         return {
@@ -305,7 +312,7 @@ def get_gpt_answers(in_data, out_data, prediction_key, args):
             answer = run_chatgpt(query, num_gen=1, num_tokens_request=32,
                     model='chatgpt' if 'gpt-3.5' in args.model else args.model,
                     use_16k=True if any([k in args.model for k in ['16k', '12k', '8k', '4k']]) else False,
-                    temperature=0, wait_time=2)
+                    temperature=0, wait_time=args.gpt_wait_time)
 
             if cat5_answer is not None:
                 answer = get_cat_5_answer(answer, cat5_answer)
@@ -385,7 +392,7 @@ def get_gpt_answers(in_data, out_data, prediction_key, args):
                     answer = run_chatgpt(query, num_gen=1, num_tokens_request=args.batch_size*PER_QA_TOKEN_BUDGET,
                             model='chatgpt' if 'gpt-3.5' in args.model else args.model,
                             use_16k=True if any([k in args.model for k in ['16k', '12k', '8k', '4k']]) else False,
-                            temperature=0, wait_time=2)
+                            temperature=0, wait_time=args.gpt_wait_time)
                     answer = answer.replace('\\"', "'").replace('json','').replace('`','').strip().replace("\\'", "")
                     answers = process_output(answer.strip())
                     break
